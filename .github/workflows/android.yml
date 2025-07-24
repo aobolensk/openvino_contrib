@@ -1,0 +1,193 @@
+name: Android APK Build
+on:
+  workflow_dispatch:
+  push:
+  pull_request:
+    paths:
+      - 'modules/android_demos/**'
+      - 'modules/java_api/**'
+      - '.github/workflows/android.yml'
+
+concurrency:
+  group: >-
+    ${{ github.event_name == 'push' && github.run_id || github.ref }}-android
+  cancel-in-progress: true
+
+env:
+  ANDROID_API_LEVEL: '30'
+  ANDROID_BUILD_TOOLS_VERSION: '34.0.0'
+  ANDROID_NDK_VERSION: '27.3.13750724'
+  OPENCV_VERSION: '4.10.0'
+
+permissions: read-all
+
+jobs:
+  Build_Android_APK:
+    name: Build Android APK
+    timeout-minutes: 120
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        shell: bash
+    env:
+      CMAKE_BUILD_TYPE: 'Release'
+      OPENVINO_REPO: ${{ github.workspace }}/openvino
+      OPENVINO_CONTRIB_REPO: ${{ github.workspace }}/openvino_contrib
+      BUILD_DIR: ${{ github.workspace }}/openvino_build
+      INSTALL_DIR: ${{ github.workspace }}/openvino_install
+      TBB_INSTALL_DIR: ${{ github.workspace }}/one-tbb-install
+      ANDROID_DEMO_PATH: >-
+        ${{ github.workspace }}/modules/android_demos/coco_detection_android_demo
+
+    steps:
+      - name: Checkout OpenVINO Contrib
+        uses: actions/checkout@v4
+        with:
+          path: openvino_contrib
+
+      - name: Clone OpenVINO
+        uses: actions/checkout@v4
+        with:
+          repository: openvinotoolkit/openvino
+          path: openvino
+          submodules: 'recursive'
+          ref: master
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK
+        run: |
+          $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager \
+            "ndk;${{ env.ANDROID_NDK_VERSION }}" \
+            "platforms;android-${{ env.ANDROID_API_LEVEL }}" \
+            "build-tools;${{ env.ANDROID_BUILD_TOOLS_VERSION }}"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            ccache \
+            ninja-build \
+            python3 \
+            python3-pip \
+            git \
+            wget \
+            scons \
+            unzip
+
+      - name: Setup Python dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install cmake
+
+      - name: Cache OpenCV Android SDK
+        id: cache-opencv
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/OpenCV-android-sdk
+          key: opencv-android-${{ env.OPENCV_VERSION }}
+
+      - name: Download OpenCV Android SDK
+        if: steps.cache-opencv.outputs.cache-hit != 'true'
+        run: |
+          wget https://github.com/opencv/opencv/releases/download/${{ env.OPENCV_VERSION }}/opencv-${{ env.OPENCV_VERSION }}-android-sdk.zip
+          unzip opencv-${{ env.OPENCV_VERSION }}-android-sdk.zip
+
+      - name: Setup environment variables
+        run: |
+          NDK_PATH="$ANDROID_SDK_ROOT/ndk/${{ env.ANDROID_NDK_VERSION }}"
+          echo "ANDROID_NDK_PATH=$NDK_PATH" >> $GITHUB_ENV
+          echo "ANDROID_NDK_HOME=$NDK_PATH" >> $GITHUB_ENV
+          echo "$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
+
+      - name: Build OneTBB for Android
+        run: |
+          git clone https://github.com/oneapi-src/oneTBB.git
+          cd oneTBB
+          cmake -S . -B build-android \
+            -DCMAKE_BUILD_TYPE=${{ env.CMAKE_BUILD_TYPE }} \
+            -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_PATH/build/cmake/android.toolchain.cmake \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-${{ env.ANDROID_API_LEVEL }} \
+            -DCMAKE_INSTALL_PREFIX=${{ env.TBB_INSTALL_DIR }} \
+            -DCMAKE_SHARED_LINKER_FLAGS="-Wl,--undefined-version" \
+            -DCMAKE_EXE_LINKER_FLAGS="-Wl,--undefined-version" \
+            -DTBB_TEST=OFF
+          cmake --build build-android --parallel $(nproc)
+          cmake --install build-android
+
+      - name: Build OpenVINO for Android
+        run: |
+          cd ${{ env.OPENVINO_REPO }}
+          cmake -S . -B ${{ env.BUILD_DIR }} \
+            -DCMAKE_BUILD_TYPE=${{ env.CMAKE_BUILD_TYPE }} \
+            -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_PATH/build/cmake/android.toolchain.cmake \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-${{ env.ANDROID_API_LEVEL }} \
+            -DCMAKE_INSTALL_PREFIX=${{ env.INSTALL_DIR }} \
+            -DENABLE_TESTS=OFF \
+            -DENABLE_SAMPLES=OFF \
+            -DENABLE_PYTHON=OFF \
+            -DOPENVINO_EXTRA_MODULES=${{ env.OPENVINO_CONTRIB_REPO }}/modules/java_api \
+            -DBUILD_java_api=ON \
+            -DTBBROOT=${{ env.TBB_INSTALL_DIR }}
+          cmake --build ${{ env.BUILD_DIR }} --parallel $(nproc)
+          cmake --install ${{ env.BUILD_DIR }}
+
+      - name: Build Java API JAR
+        run: |
+          cd ${{ env.OPENVINO_CONTRIB_REPO }}/modules/java_api
+          export INTEL_OPENVINO_DIR=${{ env.INSTALL_DIR }}
+          gradle build -x test
+
+      - name: Prepare Android Demo Dependencies
+        run: |
+          # Create required directories
+          mkdir -p ${{ env.ANDROID_DEMO_PATH }}/app/libs
+          mkdir -p ${{ env.ANDROID_DEMO_PATH }}/app/src/main/jniLibs/arm64-v8a
+
+          # Copy Java API JAR
+          cp ${{ env.OPENVINO_CONTRIB_REPO }}/modules/java_api/build/libs/*.jar ${{ env.ANDROID_DEMO_PATH }}/app/libs/openvino-java-api.jar
+
+          # Copy native libraries
+          cp -r ${{ env.INSTALL_DIR }}/runtime/lib/aarch64/* ${{ env.ANDROID_DEMO_PATH }}/app/src/main/jniLibs/arm64-v8a/
+          cp -r ${{ env.TBB_INSTALL_DIR }}/lib/* ${{ env.ANDROID_DEMO_PATH }}/app/src/main/jniLibs/arm64-v8a/
+          cp $ANDROID_NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so ${{ env.ANDROID_DEMO_PATH }}/app/src/main/jniLibs/arm64-v8a/
+
+          # Setup OpenCV
+          cp -r ${{ github.workspace }}/OpenCV-android-sdk/sdk ${{ env.ANDROID_DEMO_PATH }}/OpenCV
+
+      - name: Build Android APK
+        run: |
+          cd ${{ env.ANDROID_DEMO_PATH }}
+          chmod +x ./gradlew
+          ./gradlew assembleDebug
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-demo-apk
+          path: ${{ env.ANDROID_DEMO_PATH }}/app/build/outputs/apk/debug/*.apk
+          retention-days: 30
+
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-build-logs
+          path: |
+            ${{ env.BUILD_DIR }}/CMakeCache.txt
+            ${{ env.BUILD_DIR }}/CMakeFiles/CMakeError.log
+            ${{ env.BUILD_DIR }}/CMakeFiles/CMakeOutput.log
+            ${{ env.ANDROID_DEMO_PATH }}/app/build/outputs/logs/
+          retention-days: 7
+
