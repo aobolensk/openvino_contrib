@@ -84,6 +84,9 @@ jobs:
             scons \
             unzip
 
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
       - name: Setup Python dependencies
         run: |
           python3 -m pip install --upgrade pip
@@ -112,6 +115,8 @@ jobs:
       - name: Build OneTBB for Android
         run: |
           git clone https://github.com/oneapi-src/oneTBB.git
+          ccache --zero-stats
+          ccache --max-size=5G
           cd oneTBB
           cmake -S . -B build-android \
             -DCMAKE_BUILD_TYPE=${{ env.CMAKE_BUILD_TYPE }} \
@@ -121,12 +126,16 @@ jobs:
             -DCMAKE_INSTALL_PREFIX=${{ env.TBB_INSTALL_DIR }} \
             -DCMAKE_SHARED_LINKER_FLAGS="-Wl,--undefined-version" \
             -DCMAKE_EXE_LINKER_FLAGS="-Wl,--undefined-version" \
-            -DTBB_TEST=OFF
+            -DTBB_TEST=OFF \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           cmake --build build-android --parallel $(nproc)
           cmake --install build-android
 
       - name: Build OpenVINO for Android
         run: |
+          ccache --zero-stats
+          ccache --max-size=5G
           cd ${{ env.OPENVINO_REPO }}
           cmake -S . -B ${{ env.BUILD_DIR }} \
             -DCMAKE_BUILD_TYPE=${{ env.CMAKE_BUILD_TYPE }} \
@@ -139,7 +148,9 @@ jobs:
             -DENABLE_PYTHON=OFF \
             -DOPENVINO_EXTRA_MODULES=${{ env.OPENVINO_CONTRIB_REPO }}/modules/java_api \
             -DBUILD_java_api=ON \
-            -DTBBROOT=${{ env.TBB_INSTALL_DIR }}
+            -DTBBROOT=${{ env.TBB_INSTALL_DIR }} \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           cmake --build ${{ env.BUILD_DIR }} --parallel $(nproc)
           cmake --install ${{ env.BUILD_DIR }}
 
@@ -166,9 +177,14 @@ jobs:
           # Setup OpenCV
           cp -r ${{ github.workspace }}/OpenCV-android-sdk/sdk ${{ env.ANDROID_DEMO_PATH }}/OpenCV
 
+      - name: Generate Gradle Wrapper
+        run: |
+          cd ${{ env.ANDROID_DEMO_PATH }}/app
+          gradle wrapper --gradle-version 8.6
+
       - name: Build Android APK
         run: |
-          cd ${{ env.ANDROID_DEMO_PATH }}
+          cd ${{ env.ANDROID_DEMO_PATH }}/app
           chmod +x ./gradlew
           ./gradlew assembleDebug
 
@@ -190,4 +206,3 @@ jobs:
             ${{ env.BUILD_DIR }}/CMakeFiles/CMakeOutput.log
             ${{ env.ANDROID_DEMO_PATH }}/app/build/outputs/logs/
           retention-days: 7
-
