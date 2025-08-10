@@ -1,29 +1,27 @@
-name: Android APK Build
+name: CPU Functional Tests on Android
 on:
   workflow_dispatch:
   push:
   pull_request:
     paths:
-      - 'modules/android_demos/**'
-      - 'modules/java_api/**'
+      - 'modules/**'
       - '.github/workflows/android.yml'
 
 concurrency:
   group: >-
-    ${{ github.event_name == 'push' && github.run_id || github.ref }}-android
+    ${{ github.event_name == 'push' && github.run_id || github.ref }}-android-cpu-tests
   cancel-in-progress: true
 
 env:
   ANDROID_API_LEVEL: '30'
   ANDROID_BUILD_TOOLS_VERSION: '34.0.0'
   ANDROID_NDK_VERSION: '27.3.13750724'
-  OPENCV_VERSION: '4.10.0'
 
 permissions: read-all
 
 jobs:
-  Build_Android_APK:
-    name: Build Android APK
+  Run_CPU_Func_Tests_Android:
+    name: Run CPU Functional Tests on Android
     timeout-minutes: 120
     runs-on: ubuntu-24.04
     defaults:
@@ -36,8 +34,6 @@ jobs:
       BUILD_DIR: ${{ github.workspace }}/openvino_build
       INSTALL_DIR: ${{ github.workspace }}/openvino_install
       TBB_INSTALL_DIR: ${{ github.workspace }}/one-tbb-install
-      ANDROID_DEMO_PATH: >-
-        ${{ github.workspace }}/modules/android_demos/coco_detection_android_demo
 
     steps:
       - name: Checkout OpenVINO Contrib
@@ -52,12 +48,6 @@ jobs:
           path: openvino
           submodules: 'recursive'
           ref: master
-
-      - name: Setup Java 17
-        uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: 'temurin'
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
@@ -84,26 +74,10 @@ jobs:
             scons \
             unzip
 
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
-
       - name: Setup Python dependencies
         run: |
           python3 -m pip install --upgrade pip
           python3 -m pip install cmake
-
-      - name: Cache OpenCV Android SDK
-        id: cache-opencv
-        uses: actions/cache@v4
-        with:
-          path: ${{ github.workspace }}/OpenCV-android-sdk
-          key: opencv-android-${{ env.OPENCV_VERSION }}
-
-      - name: Download OpenCV Android SDK
-        if: steps.cache-opencv.outputs.cache-hit != 'true'
-        run: |
-          wget https://github.com/opencv/opencv/releases/download/${{ env.OPENCV_VERSION }}/opencv-${{ env.OPENCV_VERSION }}-android-sdk.zip
-          unzip opencv-${{ env.OPENCV_VERSION }}-android-sdk.zip
 
       - name: Setup environment variables
         run: |
@@ -143,56 +117,43 @@ jobs:
             -DANDROID_ABI=arm64-v8a \
             -DANDROID_PLATFORM=android-${{ env.ANDROID_API_LEVEL }} \
             -DCMAKE_INSTALL_PREFIX=${{ env.INSTALL_DIR }} \
-            -DENABLE_TESTS=OFF \
+            -DENABLE_TESTS=ON \
             -DENABLE_SAMPLES=OFF \
             -DENABLE_PYTHON=OFF \
-            -DOPENVINO_EXTRA_MODULES=${{ env.OPENVINO_CONTRIB_REPO }}/modules/java_api \
-            -DBUILD_java_api=ON \
+            -DOPENVINO_EXTRA_MODULES=${{ env.OPENVINO_CONTRIB_REPO }}/modules \
             -DTBBROOT=${{ env.TBB_INSTALL_DIR }} \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           cmake --build ${{ env.BUILD_DIR }} --parallel $(nproc)
           cmake --install ${{ env.BUILD_DIR }}
 
-      - name: Build Java API JAR
+      - name: Package CPU Functional Tests
         run: |
-          cd ${{ env.OPENVINO_CONTRIB_REPO }}/modules/java_api
-          export INTEL_OPENVINO_DIR=${{ env.INSTALL_DIR }}
-          gradle build -x test
+          # Create test package directory
+          mkdir -p android_test_package
+          
+          # Copy the test binary
+          cp ${{ env.BUILD_DIR }}/bin/aarch64/Release/ov_cpu_func_tests android_test_package/
+          
+          # Copy required libraries
+          cp -r ${{ env.INSTALL_DIR }}/runtime/lib/aarch64/* android_test_package/
+          cp -r ${{ env.TBB_INSTALL_DIR }}/lib/* android_test_package/
+          cp $ANDROID_NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so android_test_package/
+          
+          # Create execution script
+          cat > android_test_package/run_tests.sh << 'EOF'
+          #!/system/bin/sh
+          export LD_LIBRARY_PATH=/data/local/tmp/ov_tests:/system/lib64
+          cd /data/local/tmp/ov_tests
+          ./ov_cpu_func_tests --gtest_output=xml:cpu_func_tests_results.xml
+          EOF
+          chmod +x android_test_package/run_tests.sh
 
-      - name: Prepare Android Demo Dependencies
-        run: |
-          # Create required directories
-          mkdir -p ${{ env.ANDROID_DEMO_PATH }}/app/libs
-          mkdir -p ${{ env.ANDROID_DEMO_PATH }}/app/src/main/jniLibs/arm64-v8a
-
-          # Copy Java API JAR
-          cp ${{ env.OPENVINO_CONTRIB_REPO }}/modules/java_api/build/libs/*.jar ${{ env.ANDROID_DEMO_PATH }}/app/libs/openvino-java-api.jar
-
-          # Copy native libraries
-          cp -r ${{ env.INSTALL_DIR }}/runtime/lib/aarch64/* ${{ env.ANDROID_DEMO_PATH }}/app/src/main/jniLibs/arm64-v8a/
-          cp -r ${{ env.TBB_INSTALL_DIR }}/lib/* ${{ env.ANDROID_DEMO_PATH }}/app/src/main/jniLibs/arm64-v8a/
-          cp $ANDROID_NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so ${{ env.ANDROID_DEMO_PATH }}/app/src/main/jniLibs/arm64-v8a/
-
-          # Setup OpenCV
-          cp -r ${{ github.workspace }}/OpenCV-android-sdk/sdk ${{ env.ANDROID_DEMO_PATH }}/OpenCV
-
-      - name: Generate Gradle Wrapper
-        run: |
-          cd ${{ env.ANDROID_DEMO_PATH }}/app
-          gradle wrapper --gradle-version 8.6
-
-      - name: Build Android APK
-        run: |
-          cd ${{ env.ANDROID_DEMO_PATH }}/app
-          chmod +x ./gradlew
-          ./gradlew assembleDebug
-
-      - name: Upload APK artifact
+      - name: Upload Android Test Package
         uses: actions/upload-artifact@v4
         with:
-          name: android-demo-apk
-          path: ${{ env.ANDROID_DEMO_PATH }}/app/build/outputs/apk/debug/*.apk
+          name: android-cpu-func-tests
+          path: android_test_package/
           retention-days: 30
 
       - name: Upload build logs on failure
@@ -204,5 +165,4 @@ jobs:
             ${{ env.BUILD_DIR }}/CMakeCache.txt
             ${{ env.BUILD_DIR }}/CMakeFiles/CMakeError.log
             ${{ env.BUILD_DIR }}/CMakeFiles/CMakeOutput.log
-            ${{ env.ANDROID_DEMO_PATH }}/app/build/outputs/logs/
           retention-days: 7
