@@ -22,7 +22,7 @@ permissions: read-all
 jobs:
   Run_CPU_Func_Tests_Android:
     name: Run CPU Functional Tests on Android
-    timeout-minutes: 120
+    timeout-minutes: 600
     runs-on: ubuntu-24.04
     defaults:
       run:
@@ -120,12 +120,10 @@ jobs:
             -DENABLE_TESTS=ON \
             -DENABLE_SAMPLES=OFF \
             -DENABLE_PYTHON=OFF \
-            -DOPENVINO_EXTRA_MODULES=${{ env.OPENVINO_CONTRIB_REPO }}/modules \
             -DTBBROOT=${{ env.TBB_INSTALL_DIR }} \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
-          cmake --build ${{ env.BUILD_DIR }} --parallel $(nproc)
-          cmake --install ${{ env.BUILD_DIR }}
+          cmake --build ${{ env.BUILD_DIR }} --parallel $(nproc) ov_cpu_func_tests
 
       - name: Package CPU Functional Tests
         run: |
