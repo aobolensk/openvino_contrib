@@ -26,6 +26,7 @@ endif()
 file(GLOB_RECURSE sources ${CMAKE_CURRENT_SOURCE_DIR}/src/main/cpp/*.cpp)
 
 add_library(${PROJECT_NAME} SHARED ${sources})
+ov_add_clang_format_target(${PROJECT_NAME}_clang FOR_TARGETS ${PROJECT_NAME})
 
 target_link_libraries(${PROJECT_NAME} PRIVATE openvino::runtime)
 target_include_directories(${PROJECT_NAME} PRIVATE ${JNI_INCLUDE_DIRS})
